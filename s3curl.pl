@@ -19,6 +19,7 @@ use POSIX;
 
 use Digest::HMAC_SHA1;
 use Digest::MD5;
+use Digest::SHA1;
 use FindBin;
 use MIME::Base64 qw(encode_base64);
 use Getopt::Long qw(GetOptions);
@@ -27,7 +28,8 @@ use constant STAT_MODE => 2;
 use constant STAT_UID => 4;
 
 # begin customizing here
-my @endpoints = ( 's3.amazonaws.com',
+my @endpoints = ( 's3.us-east.cloud-object-storage.appdomain.cloud',
+		  's3.amazonaws.com',
                   's3-us-west-1.amazonaws.com',
                   's3-us-west-2.amazonaws.com',
                   's3-us-gov-west-1.amazonaws.com',
@@ -48,6 +50,7 @@ my $secretKey;
 my $contentType = "";
 my $acl;
 my $contentMD5 = "";
+my $contentSHA1 = "";
 my $fileToPut;
 my $createBucket;
 my $doDelete;
@@ -58,6 +61,7 @@ my $copySourceObject;
 my $copySourceRange;
 my $postBody;
 my $calculateContentMD5 = 0;
+my $calculateContentSHA1 = 0;
 my $servicePath = "";
 
 my $DOTFILENAME=".s3curl";
@@ -99,6 +103,7 @@ GetOptions(
     'help' => \$help,
     'debug' => \$debug,
     'calculateContentMd5' => \$calculateContentMD5,
+    'calculateContentSha1' => \$calculateContentSHA1,
     'servicePath:s' => \$servicePath,
     'endpoint:s' => \@endpoints,
 );
@@ -113,6 +118,7 @@ Usage $0 --id friendly-name (or AWSAccessKeyId) [options] -- [curl-options] [URL
   --acl public-read           use a 'canned' ACL (x-amz-acl header)
   --contentMd5 content_md5    add Content-MD5 header
   --calculateContentMd5       calculate Content-MD5 and add it
+  --calculateContentSha1      calculate SHA1 checksum and add it (x-amz-checksum-sha1 header)
   --put <filename>            PUT request (from the provided local file)
   --post [<filename>]         POST request (optional local file)
   --copySrc bucket/key        Copy from this source key
@@ -175,10 +181,24 @@ if ($calculateContentMD5) {
     }
 }
 
+if ($calculateContentSHA1) {
+    if ($fileToPut) {
+        $contentSHA1 = calculateFileContentSHA1($fileToPut);
+    } elsif ($createBucket) {
+        $contentSHA1 = calculateStringContentSHA1(getCreateBucketData($createBucket));
+    } elsif ($postBody) {
+        $contentSHA1 = calculateFileContentSHA1($postBody);
+    } else {
+        $contentSHA1 = calculateStringContentSHA1('');
+    }
+    debug ("content SHA1 checksum: $contentSHA1");
+}
+
 my %xamzHeaders;
 $xamzHeaders{'x-amz-acl'}=$acl if (defined $acl);
 $xamzHeaders{'x-amz-copy-source'}=$copySourceObject if (defined $copySourceObject);
 $xamzHeaders{'x-amz-copy-source-range'}="bytes=$copySourceRange" if (defined $copySourceRange);
+$xamzHeaders{'x-amz-checksum-sha1'}=$contentSHA1 if (defined $calculateContentSHA1);
 
 # try to understand curl args
 for (my $i=0; $i<@ARGV; $i++) {
@@ -259,6 +279,7 @@ push @args, ("-v") if ($debug);
 push @args, ("-H", "Date: $httpDate") if ($httpDate);
 push @args, ("-H", "Authorization: AWS $keyId:$signature");
 push @args, ("-H", "x-amz-acl: $acl") if (defined $acl);
+push @args, ("-H", "x-amz-checksum-sha1: $contentSHA1")  if (length $contentSHA1);
 push @args, ("-L");
 push @args, ("-H", "content-type: $contentType") if (defined $contentType);
 push @args, ("-H", "Content-MD5: $contentMD5") if (length $contentMD5);
@@ -389,6 +410,29 @@ sub calculateFileContentMD5 {
     $md5->addfile(*FILE);
     close(FILE) || die "could not close $file_name";
     my $b64 = encode_base64($md5->digest);
+    chomp($b64);
+    return $b64;
+}
+
+# calculates the SHA1 header for a string.
+sub calculateStringContentSHA1 {
+    my ($string) = @_;
+    my $sha1 = Digest::SHA1->new;
+    $sha1->add($string);
+    my $b64 = encode_base64($sha1->digest);
+    chomp($b64);
+    return $b64;
+}
+
+# calculates the SHA1 header for a file.
+sub calculateFileContentSHA1 {
+    my ($file_name) = @_;
+    open(FILE, "<$file_name") || die "could not open file $file_name for SHA1 calculation";
+    binmode(FILE) || die "could not set file reading to binary mode: $!";
+    my $sha1 = Digest::SHA1->new;
+    $sha1->addfile(*FILE);
+    close(FILE) || die "could not close $file_name";
+    my $b64 = encode_base64($sha1->digest);
     chomp($b64);
     return $b64;
 }
